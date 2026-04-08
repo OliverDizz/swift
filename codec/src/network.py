@@ -85,7 +85,7 @@ class Binarizer(nn.Module):
 
     def forward(self, input):
         feat = self.conv(input)
-        x = F.tanh(feat)
+        x = torch.tanh(feat)
         return self.sign(x)
 
 
@@ -183,7 +183,7 @@ class DecoderCell(nn.Module):
         x = hidden4[0]
         x = F.pixel_shuffle(x, 2)
 
-        x = F.tanh(self.conv2(x)) / 2
+        x = torch.tanh(self.conv2(x)) / 2
         return x, hidden1, hidden2, hidden3, hidden4
 
 
@@ -214,7 +214,7 @@ class EarlyExit(nn.Module):
         x = F.pixel_shuffle(input, self.shuffle_up)
         x = self.conv(x)
         #x = self.exit_head(input)
-        return F.tanh(x) / 2
+        return torch.tanh(x) / 2
 
 
 
@@ -292,7 +292,7 @@ class DecoderCell2(nn.Module):
 
         b,d,h,w = input.shape # 4x4, 80
         #print('1: {}'.format(input.shape))
-        x = F.relu(self.conv1(input)) #F.tanh
+        x = F.relu(self.conv1(input)) #torch.tanh
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
         #print('2: {}'.format(x.shape))
@@ -340,7 +340,7 @@ class DecoderCell2(nn.Module):
         x = F.pixel_shuffle(x, 2) # 64x64, 32
         #print('8: {}'.format(x.shape))
 
-        x = F.tanh(self.conv_end(x)) / 2
+        x = torch.tanh(self.conv_end(x)) / 2
         return x, out_ee1, out_ee2, out_ee3, out_ee4, hidden1, hidden2, hidden3, hidden4
 
 
@@ -398,22 +398,22 @@ class DecoderCell2(nn.Module):
     def forward(self, input, hidden1, hidden2, hidden3, hidden4, unet_output1, unet_output2):
 
         b,d,h,w = input.shape
-        x = F.tanh(self.conv_st_1(input))
-        x = F.tanh(self.conv_st_2(x))
-        x = F.tanh(self.conv_st_3(x))
-        #x = F.tanh(self.conv_st_4(x)) ####
+        x = torch.tanh(self.conv_st_1(input))
+        x = torch.tanh(self.conv_st_2(x))
+        x = torch.tanh(self.conv_st_3(x))
+        #x = torch.tanh(self.conv_st_4(x)) ####
         #x = self.res1(x)
-        #x = F.tanh(self.bn1(self.conv1(x)))
+        #x = torch.tanh(self.bn1(self.conv1(x)))
         #if self.groups>1:
         #    x = x.reshape(b,10,-1,h,w).sum(1)
-        x = F.tanh(self.conv1(x))
+        x = torch.tanh(self.conv1(x))
         #print(x.shape)
 
         x = F.pixel_shuffle(x, 2)
         #print(x.shape)
 
-        x = F.tanh(self.conv2_g1(x))
-        x = F.tanh(self.conv2_g2(x))
+        x = torch.tanh(self.conv2_g1(x))
+        x = torch.tanh(self.conv2_g2(x))
         #print(x.shape)
         if self.groups>1:
             x = x.reshape(b,10,-1,h*2,w*6).sum(1)
@@ -424,26 +424,26 @@ class DecoderCell2(nn.Module):
 
         #x = self.res2(x)
         #print(x.shape)
-        x = F.tanh(self.conv2(x))
-        x = F.tanh(self.conv2_2(x)) ####
+        x = torch.tanh(self.conv2(x))
+        x = torch.tanh(self.conv2_2(x)) ####
         x = F.pixel_shuffle(x, 2)
 
         if self.v_compress and self.fuse_level >= 2:
             x = torch.cat([x, unet_output1[1], unet_output2[1]], dim=1)
 
         #x = self.res3(x)
-        x = F.tanh(self.conv3(x))
-        x = F.tanh(self.conv3_2(x)) ####
+        x = torch.tanh(self.conv3(x))
+        x = torch.tanh(self.conv3_2(x)) ####
         x = F.pixel_shuffle(x, 2)
 
         if self.v_compress:
             x = torch.cat([x, unet_output1[2], unet_output2[2]], dim=1)
 
         #x = self.res4(x)
-        x = F.tanh(self.conv4(x))
+        x = torch.tanh(self.conv4(x))
         x = F.pixel_shuffle(x, 2)
 
-        x = F.tanh(self.conv_end(x)) / 2
+        x = torch.tanh(self.conv_end(x)) / 2
         return x, hidden1, hidden2, hidden3, hidden4
 
 
@@ -587,7 +587,7 @@ class DecoderCell2(nn.Module):
         x = self.res4(x)
         x = F.pixel_shuffle(x, 2)
 
-        x = F.tanh(self.conv_end(x)) / 2
+        x = torch.tanh(self.conv_end(x)) / 2
         return x, hidden1, hidden2, hidden3, hidden4
 
 

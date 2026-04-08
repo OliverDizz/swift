@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as LS
-from torch.autograd import Variable
+# Removed Variable import as it's deprecated
 
 from dataset import get_loader
 from evaluate import run_eval
@@ -63,8 +63,6 @@ if len(gpus) > 1:
 
 params = [{'params': net.parameters()} for net in nets]
 
-#code.interact(local=locals()) ########
-
 solver = optim.Adam(
     params,
     lr=args.lr)
@@ -119,7 +117,7 @@ if args.load_model_name:
 while True:
 
     for batch, (crops, ctx_frames, _) in enumerate(train_loader):
-        scheduler.step()
+        # FIX: Removed scheduler.step() from here
         train_iter += 1
 
         if train_iter > args.max_train_iters:
@@ -135,16 +133,13 @@ while True:
             batch_size=(crops[0].size(0) * args.num_crops), height=crops[0].size(2),
             width=crops[0].size(3), args=args)
 
-        '''(_,_,_,d2_h_1, d2_h_2, d2_h_3, d2_h_4) = init_lstm(
-            batch_size=(crops[0].size(0) * args.num_crops), height=crops[0].size(2),
-            width=crops[0].size(3), args=args)'''
-
         # Forward U-net.
         if args.v_compress:
             unet_output1, unet_output2 = forward_ctx(unet, ctx_frames)
         else:
-            unet_output1 = Variable(torch.zeros(args.batch_size,)).cuda()
-            unet_output2 = Variable(torch.zeros(args.batch_size,)).cuda()
+            # FIX: Removed deprecated 'Variable' wrapper
+            unet_output1 = torch.zeros(args.batch_size).cuda()
+            unet_output2 = torch.zeros(args.batch_size).cuda()
 
         res, frame1, frame2, warped_unet_output1, warped_unet_output2 = prepare_inputs(
             crops, args, unet_output1, unet_output2)
@@ -159,11 +154,8 @@ while True:
 
         out_img = torch.zeros(1, 3, height, width).cuda() + 0.5
 
-        #code_arr=[]
         b,d,h,w= batch_size, args.bits, height//16, width//16
         code_arr=[torch.zeros(b,d,h,w).cuda() for i in range(args.iterations)]
-        #print(res.shape)
-        #cum_output_d2 = torch.zeros(1, 3, height, width).cuda()
 
         for i in range(args.iterations):
             if args.v_compress and args.stack:
@@ -178,8 +170,6 @@ while True:
 
             # Binarize.
             codes = binarizer(encoded)
-            #print(codes.shape)
-            #code_arr=[torch.zeros(b,d,h,w).cuda() for j in range(args.iterations)]
             code_arr[i] = codes
 
             # Decode.
@@ -195,20 +185,17 @@ while True:
                 batch_size=(crops[0].size(0) * args.num_crops), height=crops[0].size(2),
                 width=crops[0].size(3), args=args)
 
-            #b,d,h,w= codes.shape
             codes_d2 = torch.stack(code_arr, dim=1).reshape(b,-1,h,w)
-            #print('iter',i,codes_d2)
+            
             (output_d2, out_ee1, out_ee2, out_ee3, out_ee4, d2_h_1, d2_h_2, d2_h_3, d2_h_4) = d2(
                     codes_d2, d2_h_1, d2_h_2, d2_h_3, d2_h_4,
                     warped_unet_output1, warped_unet_output2)
-            #cum_output_d2 += output_d2
 
             rec2_losses.append((in_img - output_d2).abs().mean())
             ee1_losses.append((in_img - out_ee1).abs().mean())
             ee2_losses.append((in_img - out_ee2).abs().mean())
             ee3_losses.append((in_img - out_ee3).abs().mean())
             ee4_losses.append((in_img - out_ee4).abs().mean())
-            #rec2_losses.append((in_img - cum_output_d2).abs().mean())
 
         bp_t1 = time.time()
 
@@ -223,9 +210,13 @@ while True:
 
         for net in [encoder, binarizer, decoder, unet, d2]:
             if net is not None:
-                torch.nn.utils.clip_grad_norm(net.parameters(), args.clip)
+                # FIX: Added _ to clip_grad_norm
+                torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
 
         solver.step()
+        
+        # FIX: Moved scheduler.step() to occur after solver.step()
+        scheduler.step()
 
         batch_t1 = time.time()
 
@@ -233,7 +224,8 @@ while True:
             print(
                 '[TRAIN] Iter[{}]; LR: {}; Losses [Rec1: {:.6f}; Rec2: {:.6f}; EE1: {:.6f}; EE2: {:.6f}; EE3: {:.6f}; EE4: {:.6f}]; Backprop: {:.4f} sec; Batch: {:.4f} sec'.
                 format(train_iter,
-                       scheduler.get_lr()[0],
+                       # FIX: Changed get_lr() to get_last_lr()
+                       scheduler.get_last_lr()[0],
                        rec1_loss.item(),
                        rec2_loss.item(),
                        ee1_loss.item(),

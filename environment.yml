@@ -1,0 +1,19 @@
+name: swift_env
+channels:
+  - conda-forge   # Move this to the top so it prioritizes forge libraries
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.6
+  - pip
+  - ffmpeg=4.4    # Bumped to 4.4 to resolve the broken libopenh264 links
+  - numpy
+  - matplotlib
+  - pytorch=1.10.0 
+  - torchvision
+  - pip:
+      - tensorflow==2.4.1
+      - opencv-python-headless==4.5.5.62
+      - scipy==1.2.1
+      - imageio
+      - tqdm

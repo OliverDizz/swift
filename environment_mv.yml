@@ -1,0 +1,14 @@
+name: mv_env
+channels:
+  - menpo
+  - conda-forge
+  - defaults
+dependencies:
+  - python=2.7
+  - pkg-config
+  - cmake
+  - gcc_linux-64
+  - gxx_linux-64
+  - x264         # Explicitly added to fix the libx264.so.138 missing dependency
+  - ffmpeg=2.8
+  - opencv=2.4.11

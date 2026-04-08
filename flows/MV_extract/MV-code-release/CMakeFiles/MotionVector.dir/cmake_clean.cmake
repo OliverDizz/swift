@@ -1,5 +1,6 @@
 file(REMOVE_RECURSE
   "CMakeFiles/MotionVector.dir/draw_flow.cpp.o"
+  "CMakeFiles/MotionVector.dir/draw_flow.cpp.o.d"
   "MotionVector"
   "MotionVector.pdb"
 )

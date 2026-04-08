@@ -50,9 +50,9 @@ python -u train.py \
   --v-compress --warp --stack --fuse-encoder \
   --bits ${bits} \
   --distance1 ${distance1} --distance2 ${distance2} \
-  --max-train-iters 20000 \
-  --checkpoint-iters 5000 \
-  --eval-iters 4000 \
+  --max-train-iters 1000 \
+  --checkpoint-iters 500 \
+  --eval-iters 250 \
   --model-dir "model" \
-  --batch-size 8 \
-  --schedule "10000,12000,14000,16000,18000" \
+  --batch-size 16 \
+  --schedule "500,600,700,800,900" \

@@ -23,7 +23,8 @@ def get_loader(is_train, root, mv_dir, args):
         dataset=dset,
         batch_size=args.batch_size if is_train else args.eval_batch_size,
         shuffle=is_train,
-        num_workers=2
+        num_workers=12,
+        pin_memory=True
     )
 
     print('Loader for {} images ({} batches) created.'.format(
@@ -35,9 +36,10 @@ def get_loader(is_train, root, mv_dir, args):
 
 def default_loader(path):
     cv2_img = cv2.imread(path)
-    if cv2_img.shape is None:
-        print(path)
-        print(cv2_img)
+    # BUG FIX: 'cv2_img' will be None if reading fails. Calling .shape on it would crash.
+    if cv2_img is None: 
+        print("Failed to load image:", path)
+        return None
     else:
         cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
 
@@ -136,13 +138,13 @@ def get_group_filenames(filename, img_idx, distance1, distance2):
 
 
 def get_bmv_filenames(mv_dir, main_fn):
-
     fn = main_fn.split('/')[-1][:-4]
 
-    return (os.path.join(mv_dir, fn + '_before_flow_x_0001.jpg'),
-            os.path.join(mv_dir, fn + '_before_flow_y_0001.jpg'),
-            os.path.join(mv_dir, fn + '_after_flow_x_0001.jpg'),
-            os.path.join(mv_dir, fn + '_after_flow_y_0001.jpg'))
+    # BUG FIX: Changed all .jpg extensions to .png so DataLoader can find the extracted matrices
+    return (os.path.join(mv_dir, fn + '_before_flow_x_0001.png'),
+            os.path.join(mv_dir, fn + '_before_flow_y_0001.png'),
+            os.path.join(mv_dir, fn + '_after_flow_x_0001.png'),
+            os.path.join(mv_dir, fn + '_after_flow_y_0001.png'))
 
 
 def get_identity_grid(shape):
@@ -181,6 +183,9 @@ class ImageFolder(data.Dataset):
         self._load_image_list()
         if is_train:
             random.shuffle(self.imgs)
+
+        if len(self.imgs) == 0:
+            raise RuntimeError(f"No valid image groups found in {root} for distance {args.distance1}/{args.distance2}")
 
         print('\tdistance=%d/%d' % (args.distance1, args.distance2))
 
@@ -268,7 +273,9 @@ class ImageFolder(data.Dataset):
             bmv[:, :, 2] = bmv[:, :, 2] / height
             bmv[:, :, 3] = bmv[:, :, 3] / width
 
-        img = np.concatenate([img, bmv], axis=2)
+            # NOTE: img is only concatenated if warp is True.
+            # If warp=False is passed in args, this script will crash here due to UnboundLocalError.
+            img = np.concatenate([img, bmv], axis=2)
 
         assert img.shape[2] == 13
         if self.is_train:
