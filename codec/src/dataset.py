@@ -1,12 +1,67 @@
 import os
 import os.path
 import glob
+from collections import defaultdict
 
 import torch
 import torch.utils.data as data
 import numpy as np
 import random
 import cv2
+
+# FIX: Prevent OpenCV from multithreading inside PyTorch workers to avoid deadlocks
+cv2.setNumThreads(0)
+
+# FIX: Ensure each worker has a unique seed so random crops/flips aren't duplicated
+def worker_init_fn(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+class ResolutionBatchSampler(torch.utils.data.Sampler):
+    def __init__(self, dataset, batch_size, shuffle=True):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        print("\nScanning dataset to bucket images by resolution...")
+        self.resolution_buckets = defaultdict(list)
+        
+        # Group all dataset indices by their image resolution
+        for idx, img_path in enumerate(self.dataset.imgs):
+            # Fast read of just the image header/shape
+            img = cv2.imread(img_path)
+            if img is not None:
+                h, w, _ = img.shape
+                # Calculate the exact dimensions Swift will crop them to
+                h_adj, w_adj = (h//16)*16, (w//16)*16
+                self.resolution_buckets[(h_adj, w_adj)].append(idx)
+                
+        print(f"Found {len(self.resolution_buckets)} different resolutions.")
+
+    def __iter__(self):
+        batches = []
+        # For each resolution group, create batches
+        for res, indices in self.resolution_buckets.items():
+            if self.shuffle:
+                random.shuffle(indices)
+                
+            # Chunk the indices into sizes of `batch_size`
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i : i + self.batch_size]
+                # Drop the last uneven batch to prevent DP crashes
+                if len(batch) == self.batch_size: 
+                    batches.append(batch)
+                    
+        # Shuffle the order of the batches so the network doesn't 
+        # see all 720p videos sequentially, then all 576p videos sequentially.
+        if self.shuffle:
+            random.shuffle(batches)
+            
+        return iter(batches)
+
+    def __len__(self):
+        return sum(len(indices) // self.batch_size for indices in self.resolution_buckets.values())
 
 
 def get_loader(is_train, root, mv_dir, args):
@@ -19,13 +74,27 @@ def get_loader(is_train, root, mv_dir, args):
         args=args,
     )
 
-    loader = data.DataLoader(
-        dataset=dset,
-        batch_size=args.batch_size if is_train else args.eval_batch_size,
-        shuffle=is_train,
-        num_workers=12,
-        pin_memory=True
-    )
+    if is_train:
+        # Use our custom sampler to prevent mixed-resolution crashes
+        sampler = ResolutionBatchSampler(dset, args.batch_size, shuffle=True)
+        
+        loader = data.DataLoader(
+            dataset=dset,
+            batch_sampler=sampler, # Inject the sampler here
+            num_workers=12,
+            pin_memory=True,
+            worker_init_fn=worker_init_fn
+            # Note: shuffle and drop_last are handled inside the batch_sampler now
+        )
+    else:
+        # Evaluation usually runs with batch_size=1, so it doesn't need the sampler
+        loader = data.DataLoader(
+            dataset=dset,
+            batch_size=args.eval_batch_size,
+            shuffle=False,
+            num_workers=12,
+            pin_memory=True
+        )
 
     print('Loader for {} images ({} batches) created.'.format(
         len(dset), len(loader))
@@ -36,7 +105,6 @@ def get_loader(is_train, root, mv_dir, args):
 
 def default_loader(path):
     cv2_img = cv2.imread(path)
-    # BUG FIX: 'cv2_img' will be None if reading fails. Calling .shape on it would crash.
     if cv2_img is None: 
         print("Failed to load image:", path)
         return None
@@ -50,13 +118,12 @@ def default_loader(path):
     return cv2_img
 
 
-def read_bmv(fn):
+def read_bmv(fn, target_h, target_w):
     a = cv2.imread(fn, 0)
     if a is not None:
-        width, height = a.shape
-        if width % 16 != 0 or height % 16 != 0:
-            a = a[:(width//16)*16, :(height//16)*16]
-
+        # If the motion vector exists but is the wrong size, force it to match the image
+        if a.shape[0] != target_h or a.shape[1] != target_w:
+            a = cv2.resize(a, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         return a[:, :, np.newaxis].astype(float) - 128.0
     else:
         print('no bmv found (it\'s okay if not too often)', fn)
@@ -65,31 +132,27 @@ def read_bmv(fn):
 
 def get_bmv(img, fns):
     before_x, before_y, after_x, after_y = fns
+    
+    # Dynamically extract the exact height and width from the loaded frame
+    h, w = img.shape[0], img.shape[1]
 
-    bmvs = [read_bmv(before_x),
-            read_bmv(before_y),
-            read_bmv(after_x),
-            read_bmv(after_y)]
+    # Pass the target dimensions to read_bmv
+    bmvs = [read_bmv(before_x, h, w),
+            read_bmv(before_y, h, w),
+            read_bmv(after_x, h, w),
+            read_bmv(after_y, h, w)]
 
+    # If files are missing, create fallback arrays that perfectly match the frame size
     if bmvs[0] is None or bmvs[1] is None:
-        if 'ultra_video_group' in before_x:
-            # We need HW to be (16n1, 16n2).
-            bmvs[0] = np.zeros((1072, 1920, 1))
-            bmvs[1] = np.zeros((1072, 1920, 1))
-        else:
-            bmvs[0] = np.zeros((288, 352, 1))
-            bmvs[1] = np.zeros((288, 352, 1))
+        bmvs[0] = np.zeros((h, w, 1))
+        bmvs[1] = np.zeros((h, w, 1))
     else:
         bmvs[0] = bmvs[0] * (-2.0)
         bmvs[1] = bmvs[1] * (-2.0)        
  
     if bmvs[2] is None or bmvs[3] is None:
-        if 'ultra_video_group' in before_x:
-            bmvs[2] = np.zeros((1072, 1920, 1))
-            bmvs[3] = np.zeros((1072, 1920, 1))
-        else:
-            bmvs[2] = np.zeros((288, 352, 1))
-            bmvs[3] = np.zeros((288, 352, 1))
+        bmvs[2] = np.zeros((h, w, 1))
+        bmvs[3] = np.zeros((h, w, 1))
     else:
         bmvs[2] = bmvs[2] * (-2.0)
         bmvs[3] = bmvs[3] * (-2.0)        
@@ -137,15 +200,24 @@ def get_group_filenames(filename, img_idx, distance1, distance2):
     return filenames
 
 
-def get_bmv_filenames(mv_dir, main_fn):
-    fn = main_fn.split('/')[-1][:-4]
+def get_bmv_filenames(mv_dir, root_dir, main_fn):
+    # Calculate the relative path to maintain the video folder structure
+    # e.g., 'video_01/00001.png'
+    rel_path = os.path.relpath(main_fn, root_dir)
+    
+    # Extract the subdirectory name (e.g., 'video_01')
+    sub_dir = os.path.dirname(rel_path)
+    
+    # Extract the base filename without extension (e.g., '00001')
+    fn = os.path.basename(main_fn)[:-4]
 
-    # BUG FIX: Changed all .jpg extensions to .png so DataLoader can find the extracted matrices
-    return (os.path.join(mv_dir, fn + '_before_flow_x_0001.png'),
-            os.path.join(mv_dir, fn + '_before_flow_y_0001.png'),
-            os.path.join(mv_dir, fn + '_after_flow_x_0001.png'),
-            os.path.join(mv_dir, fn + '_after_flow_y_0001.png'))
+    # Combine mv_dir with the specific video's subdirectory
+    target_mv_dir = os.path.join(mv_dir, sub_dir)
 
+    return (os.path.join(target_mv_dir, fn + '_before_flow_x_0001.png'),
+            os.path.join(target_mv_dir, fn + '_before_flow_y_0001.png'),
+            os.path.join(target_mv_dir, fn + '_after_flow_x_0001.png'),
+            os.path.join(target_mv_dir, fn + '_after_flow_y_0001.png'))
 
 def get_identity_grid(shape):
     width, height = shape
@@ -202,8 +274,7 @@ class ImageFolder(data.Dataset):
                 positions = [2, 3, 5, 6, 8, 9, 11, 0]
             else:
                 assert False, 'not implemented.'
-
-        for filename in glob.iglob(self.root + '/*png'):
+        for filename in glob.iglob(os.path.join(self.root, '**', '*.png'), recursive=True):
             img_idx = int(filename[:-4].split('_')[-1])
 
             if self.args.v_compress:
@@ -251,7 +322,7 @@ class ImageFolder(data.Dataset):
 
         if self.args.warp:
             bmv = np.concatenate(get_bmv(
-                img, get_bmv_filenames(self.mv_dir, main_fn)), axis=2)
+                img, get_bmv_filenames(self.mv_dir, self.root, main_fn)), axis=2)
 
             img_idx = int(main_fn[:-4].split('_')[-1])
 
@@ -273,16 +344,14 @@ class ImageFolder(data.Dataset):
             bmv[:, :, 2] = bmv[:, :, 2] / height
             bmv[:, :, 3] = bmv[:, :, 3] / width
 
-            # NOTE: img is only concatenated if warp is True.
-            # If warp=False is passed in args, this script will crash here due to UnboundLocalError.
             img = np.concatenate([img, bmv], axis=2)
 
         assert img.shape[2] == 13
         if self.is_train:
-            # If use_bmv, * -1.0 on bmv for flipped images.
             img = flip_cv2(img, self.patch)
 
-        if self.identity_grid is None:
+        # Check if the grid doesn't exist OR if the current image is a different resolution
+        if self.identity_grid is None or self.identity_grid.shape[:2] != img.shape[:2]:
             self.identity_grid = get_identity_grid(img.shape[:2])
 
         img[..., 9 :11] += self.identity_grid

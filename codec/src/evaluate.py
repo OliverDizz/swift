@@ -3,10 +3,8 @@ import os
 import time
 
 import numpy as np
-from scipy.misc import imread, imresize, imsave
 
 import torch
-from torch.autograd import Variable
 import torch.utils.data as data
 
 from util import eval_forward, evaluate, evaluate_psnr, get_models, set_eval, save_numpy_array_as_image
@@ -86,11 +84,16 @@ def run_eval(model, eval_loader, args, output_suffix=''):
   all_losses, all_msssim, all_psnr = [], [], []
   all_psnr_ee1, all_psnr_ee2, all_psnr_ee3, all_psnr_ee4 = [], [], [], []
 
+  # FIX: Determine the primary device dynamically using args.gpus
+  gpus = [int(gpu) for gpu in args.gpus.split(',')] if hasattr(args, 'gpus') and args.gpus else []
+  primary_device = torch.device(f"cuda:{gpus[0]}" if len(gpus) > 0 and torch.cuda.is_available() else "cpu")
+
   start_time = time.time()
   for i, (batch, ctx_frames, filenames) in enumerate(eval_loader):
 
       with torch.no_grad():
-          batch = batch.cuda()
+          # FIX: Replaced .cuda() with .to(primary_device) to avoid DataParallel mismatch crashes
+          batch = batch.to(primary_device)
 
           original, out_imgs, out_imgs_ee1, out_imgs_ee2, out_imgs_ee3, out_imgs_ee4, losses, code_batch = eval_forward(
                   model, (batch, ctx_frames), args)

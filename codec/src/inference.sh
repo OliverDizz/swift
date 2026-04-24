@@ -10,7 +10,7 @@ hier=$1
 load_iter=$2
 iterations=${3:-16} # Defaults to 16 if not provided
 
-modeldir="model/test"
+modeldir="model/full_test"
 train="data/train"  # Dummy path required by parser
 eval="data/eval"
 train_mv="data/train_mv"

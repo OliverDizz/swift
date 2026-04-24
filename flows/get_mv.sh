@@ -4,8 +4,8 @@
 # tmp_prefix='trace'
 # mode=8digits
 
-indir=/nfs/home/olidiz18/git/swift/codec/src/data/eval
-outdir=/nfs/home/olidiz18/git/swift/codec/src/data/eval_mv
+indir=/nfs/home/olidiz18/git/swift/codec/src/data/eval/silent
+outdir=/nfs/home/olidiz18/git/swift/codec/src/data/eval_mv/silent
 tmp_prefix=frame$1_
 mode=4digits
 type=png

@@ -4,7 +4,7 @@ if (( $# != 1 )); then
 fi
 hier=$1
 
-modeldir=model
+modeldir=model/full_test
 
 train="data/train"
 eval="data/eval"
@@ -50,9 +50,10 @@ python -u train.py \
   --v-compress --warp --stack --fuse-encoder \
   --bits ${bits} \
   --distance1 ${distance1} --distance2 ${distance2} \
-  --max-train-iters 1000 \
-  --checkpoint-iters 500 \
-  --eval-iters 250 \
-  --model-dir "model" \
-  --batch-size 16 \
-  --schedule "500,600,700,800,900" \
+  --max-train-iters 50000 \
+  --checkpoint-iters 12500  \
+  --eval-iters 1000 \
+  --model-dir ${modeldir} \
+  --batch-size 4 \
+  --gpus 0,1 \
+  --schedule "500,600,700,800,900"
