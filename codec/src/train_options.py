@@ -88,3 +88,7 @@ parser.add_argument('--checkpoint-iters', type=int, default=10000,
                     help='Model checkpoint period.')
 parser.add_argument('--eval-iters', type=int, default=4500,
                     help='Evaluation period.')
+
+#----- new options with semantic layers ------
+parser.add_argument('--train-masks', type=str, default='data/train_masks', help='path to training masks')
+parser.add_argument('--eval-masks', type=str, default='data/eval_masks', help='path to evaluation masks')

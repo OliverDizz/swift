@@ -182,8 +182,9 @@ def save_numpy_array_as_image(filename, arr):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imwrite(filename, img)
 
-def eval_forward(model, batch, args):
-    batch, ctx_frames = batch
+# --- MODIFIED: Adjusted signature to accept inputs tuple ---
+def eval_forward(model, inputs, args):
+    batch, ctx_frames, masks = inputs # Added masks
     cooked_batch = prepare_batch(
         batch, args.v_compress, args.warp)
 
@@ -192,6 +193,7 @@ def eval_forward(model, batch, args):
             model=model,
             cooked_batch=cooked_batch,
             ctx_frames=ctx_frames,
+            masks=masks, # Passed masks down to the network
             args=args,
             v_compress=args.v_compress,
             iterations=args.iterations,
@@ -213,10 +215,15 @@ def prepare_unet_output(unet, unet_input, flows, warp):
             flows, unet_output1, unet_output2)
             
     return unet_output1, unet_output2
-    
-def forward_model(model, cooked_batch, ctx_frames, args, v_compress,
+
+# --- MODIFIED: Added `masks` parameter and Pass 0 logic ---
+def forward_model(model, cooked_batch, ctx_frames, masks, args, v_compress,
                   iterations, encoder_fuse_level, decoder_fuse_level):
-    encoder, binarizer, decoder, d2, unet = model
+    
+    # Unpack visual and new semantic models
+    encoder, binarizer, decoder, d2, semantic_encoder, semantic_binarizer, semantic_decoder = model[:7]
+    unet = model[7] if len(model) > 7 else None
+    
     res, _, _, flows = cooked_batch
     in_img = res
 
@@ -226,6 +233,16 @@ def forward_model(model, cooked_batch, ctx_frames, args, v_compress,
     ctx_frames = ctx_frames.to(device) - 0.5
     frame1 = ctx_frames[:, :3]
     frame2 = ctx_frames[:, 3:]
+    
+    # Ensure masks are on the correct device
+    masks = masks.to(device)
+
+    # ---------------------------------------------------------
+    # PASS 0: SEMANTIC BASE LAYER
+    # ---------------------------------------------------------
+    sem_encoded = semantic_encoder(masks)
+    sem_codes = semantic_binarizer(sem_encoded)
+    reconstructed_semantics = semantic_decoder(sem_codes)
 
     batch_size, _, height, width = res.size()
     
@@ -266,11 +283,16 @@ def forward_model(model, cooked_batch, ctx_frames, args, v_compress,
     b, d, h, w = batch_size, args.bits, height // 16, width // 16
     code_arr = [torch.zeros(b, d, h, w).to(device) for _ in range(args.iterations)]
 
+    # ---------------------------------------------------------
+    # PASS 1-N: VISUAL ITERATIONS
+    # ---------------------------------------------------------
     for i in range(iterations):
+        
+        # --- MODIFIED: Concatenate semantic outputs to encoder input ---
         if args.v_compress and args.stack:
-            encoder_input = torch.cat([frame1, res, frame2], dim=1)
+            encoder_input = torch.cat([frame1, res, frame2, reconstructed_semantics], dim=1)
         else:
-            encoder_input = res
+            encoder_input = torch.cat([res, reconstructed_semantics], dim=1)
 
         # FIX: Cast list arguments to tuples to satisfy DataParallel scatter requirements
         encoded, encoder_h_1, encoder_h_2, encoder_h_3 = encoder(

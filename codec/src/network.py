@@ -16,9 +16,12 @@ class EncoderCell(nn.Module):
         if fuse_encoder:
             print('\tEncoder fuse level: {}'.format(self.fuse_level))
 
+        # --- MODIFIED: +1 channel to accept the reconstructed semantic mask ---
+        in_channels = (9 if stack else 3) + 1
+        
         # Layers.
         self.conv = nn.Conv2d(
-            9 if stack else 3,
+            in_channels,
             64,
             kernel_size=3, stride=2, padding=1, bias=False)
 
@@ -75,6 +78,66 @@ class EncoderCell(nn.Module):
         hidden3 = self.rnn3(x, hidden3)
         x = hidden3[0]
         return x, hidden1, hidden2, hidden3
+
+
+# --- NEW: Semantic Encoder ---
+class SemanticEncoder(nn.Module):
+    """
+    Encodes a 1-channel semantic mask down by a factor of 16 to match the video bottleneck.
+    """
+    def __init__(self, in_channels=1):
+        super(SemanticEncoder, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# --- NEW: Semantic Decoder ---
+class SemanticDecoder(nn.Module):
+    """
+    Decodes the binarized bottleneck back to full resolution (16x upsample).
+    """
+    def __init__(self, out_channels=1, bits=32):
+        super(SemanticDecoder, self).__init__()
+        
+        self.conv_in = nn.Conv2d(bits, 512, kernel_size=1, bias=False)
+        
+        self.up1 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 512 -> 128
+            nn.ReLU(inplace=True)
+        )
+        self.up2 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 256 -> 64
+            nn.ReLU(inplace=True)
+        )
+        self.up3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 128 -> 32
+            nn.ReLU(inplace=True)
+        )
+        self.up4 = nn.Sequential(
+            nn.Conv2d(32, out_channels * 4, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2)  # out_channels*4 -> out_channels
+        )
+
+    def forward(self, x):
+        x = self.conv_in(x)
+        x = self.up1(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        return torch.sigmoid(x) # Constrain output mask between 0 and 1
 
 
 class Binarizer(nn.Module):
@@ -198,17 +261,6 @@ class EarlyExit(nn.Module):
         self.shuffle_up = shuffle_up
         self.conv_in = conv_in
         self.conv = nn.Conv2d(conv_in//(shuffle_up**2), 3, kernel_size=1, stride=1, padding=0, bias=False)
-        ''' # progressive
-        self.exit_head = []
-        while self.shuffle_up != 2:
-            self.shuffle_up = self.shuffle_up//2
-            self.conv_in = self.conv_in//4
-            self.exit_head.append(nn.PixelShuffle(2))
-            self.exit_head.append(nn.Conv2d(self.conv_in, self.conv_in, kernel_size=1, stride=1, padding=0, bias=False))
-            self.exit_head.append(nn.ReLU())
-        self.exit_head.append(nn.PixelShuffle(2))
-        self.exit_head.append(nn.Conv2d(self.conv_in//4, 3, kernel_size=1, stride=1, padding=0, bias=False))
-        self.exit_head = nn.Sequential(*self.exit_head)'''
 
     def forward(self, input):
         x = F.pixel_shuffle(input, self.shuffle_up)
@@ -229,15 +281,9 @@ class DecoderCell2(nn.Module):
         print('\tDecoder fuse level: {}'.format(self.fuse_level))
 
         # Layers.
-        #self.conv1 = nn.Conv2d(
-        #    bits*10, 512, kernel_size=1, stride=1, padding=0, bias=False)
-
         self.conv1 = nn.Conv2d(bits*10, 64*10, groups=10, kernel_size=1, stride=1, padding=0, bias=False) # groups=10
         self.conv2 = nn.Conv2d(64*10, 128*10, groups=10, kernel_size=1, stride=1, padding=0, bias=False)
         self.conv3 = nn.Conv2d(128*10, 512*10, groups=10, kernel_size=1, stride=1, padding=0, bias=False)
-        #self.bn1 = nn.BatchNorm2d(64*10)
-        #self.bn2 = nn.BatchNorm2d(128*10)
-        #self.bn3 = nn.BatchNorm2d(512*10)
 
         self.ee1 = EarlyExit(shuffle_up=16, conv_in=512)
         self.ee2 = EarlyExit(shuffle_up=8, conv_in=512)
@@ -291,21 +337,16 @@ class DecoderCell2(nn.Module):
                 unet_output1, unet_output2):
 
         b,d,h,w = input.shape # 4x4, 80
-        #print('1: {}'.format(input.shape))
         x = F.relu(self.conv1(input)) #torch.tanh
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
-        #print('2: {}'.format(x.shape))
         x = x.reshape(b,10,-1,h,w).sum(1) # 4x4, 512
-        #print('3: {}'.format(x.shape))
         hidden1 = self.rnn1(x, hidden1)
 
         # rnn 2
         x = hidden1[0]
         out_ee1 = self.ee1(x) #.detach())
-        #print('4: {}'.format(x.shape))
         x = F.pixel_shuffle(x, 2) # 8x8, 128
-        #print('5: {}'.format(x.shape))
 
         if self.v_compress and self.fuse_level >= 3:
             x = torch.cat([x, unet_output1[0], unet_output2[0]], dim=1)
@@ -316,7 +357,6 @@ class DecoderCell2(nn.Module):
         x = hidden2[0]
         out_ee2 = self.ee2(x) #.detach())
         x = F.pixel_shuffle(x, 2) # 16x16, 128
-        #print('6: {}'.format(x.shape))
 
         if self.v_compress and self.fuse_level >= 2:
             x = torch.cat([x, unet_output1[1], unet_output2[1]], dim=1)
@@ -327,7 +367,6 @@ class DecoderCell2(nn.Module):
         x = hidden3[0]
         out_ee3 = self.ee3(x) #.detach())
         x = F.pixel_shuffle(x, 2) # 32x32, 64
-        #print('7: {}'.format(x.shape))
 
         if self.v_compress:
             x = torch.cat([x, unet_output1[2], unet_output2[2]], dim=1)
@@ -338,7 +377,6 @@ class DecoderCell2(nn.Module):
         x = hidden4[0]
         out_ee4 = self.ee4(x) #.detach())
         x = F.pixel_shuffle(x, 2) # 64x64, 32
-        #print('8: {}'.format(x.shape))
 
         x = torch.tanh(self.conv_end(x)) / 2
         return x, out_ee1, out_ee2, out_ee3, out_ee4, hidden1, hidden2, hidden3, hidden4

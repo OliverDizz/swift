@@ -1,20 +1,26 @@
 #!/bin/bash
 
 if (( $# < 2 )); then
-    echo "Usage: ./inference.sh [hier: 0-2] [load-iter] [iterations (optional, default: 16)]"
-    echo "Example: ./inference.sh 2 10000 16"
+    echo "Usage: ./inference.sh [hier: 0-2] [load-iter] [iterations (optional, default: 10)]"
+    echo "Example: ./inference.sh 0 2200 10"
     exit 1
 fi
 
 hier=$1
 load_iter=$2
-iterations=${3:-16} # Defaults to 16 if not provided
+iterations=${3:-10} # Defaults to 10 (matching your training setup)
 
-modeldir="model/full_test"
+# --- MODIFIED: Point to the new semantic model directory ---
+modeldir="model/sem_test_2"
+
 train="data/train"  # Dummy path required by parser
 eval="data/eval"
 train_mv="data/train_mv"
 eval_mv="data/eval_mv"
+
+# --- NEW: Define Mask Directories ---
+train_masks="data/train_masks"
+eval_masks="data/eval_masks"
 
 # Set network architecture parameters based on hierarchy level
 if [[ ${hier} == "0" ]]; then
@@ -41,7 +47,7 @@ else
 fi
 
 echo "================================================="
-echo "Running Swift Inference"
+echo "Running Swift Inference (Semantic Base Layer)"
 echo "Hierarchy Level: ${hier} (Distances: ${distance1}/${distance2})"
 echo "Loading Checkpoint: Iteration ${load_iter}"
 echo "Decoding Layers (Iterations): ${iterations}"
@@ -52,6 +58,8 @@ python -u inference.py \
   --eval ${eval} \
   --train-mv ${train_mv} \
   --eval-mv ${eval_mv} \
+  --train-masks ${train_masks} \
+  --eval-masks ${eval_masks} \
   --encoder-fuse-level ${encoder_fuse_level} \
   --decoder-fuse-level ${decoder_fuse_level} \
   --v-compress --warp --stack --fuse-encoder \
