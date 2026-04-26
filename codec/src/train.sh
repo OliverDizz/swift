@@ -6,7 +6,7 @@ if (( $# != 1 )); then
 fi
 hier=$1
 
-modeldir=model/sem_test_2
+modeldir=model/sem_test_edge
 
 train="data/train"
 eval="data/eval"
@@ -15,6 +15,9 @@ eval_mv="data/eval_mv"
 
 train_masks="data/train_masks"
 eval_masks="data/eval_masks"
+
+train_edge="data/train_edge"
+eval_edge="data/eval_edge"
 
 if [[ ${hier} == "0" ]]; then
   distance1=6
@@ -47,6 +50,8 @@ python -u train.py \
   --eval-mv ${eval_mv} \
   --train-masks ${train_masks} \
   --eval-masks ${eval_masks} \
+  --train-edges ${train_edge} \
+  --eval-edges ${eval_edge} \
   --encoder-fuse-level ${encoder_fuse_level} \
   --decoder-fuse-level ${decoder_fuse_level} \
   --v-compress --warp --stack --fuse-encoder \
@@ -55,9 +60,9 @@ python -u train.py \
   --distance2 ${distance2} \
   --max-train-iters 10000 \
   --checkpoint-iters 10000 \
-  --eval-iters 10000 \
+  --eval-iters 5000 \
   --model-dir ${modeldir} \
-  --batch-size 4 \
+  --batch-size 2 \
   --gpus 0,1 \
   --schedule "5000,10000,20000,30000,40000"
 

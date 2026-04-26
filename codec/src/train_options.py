@@ -92,3 +92,6 @@ parser.add_argument('--eval-iters', type=int, default=4500,
 #----- new options with semantic layers ------
 parser.add_argument('--train-masks', type=str, default='data/train_masks', help='path to training masks')
 parser.add_argument('--eval-masks', type=str, default='data/eval_masks', help='path to evaluation masks')
+
+parser.add_argument('--train-edges', type=str, default='data/train_edge')
+parser.add_argument('--eval-edges', type=str, default='data/eval_edge')

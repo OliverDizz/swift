@@ -16,8 +16,8 @@ class EncoderCell(nn.Module):
         if fuse_encoder:
             print('\tEncoder fuse level: {}'.format(self.fuse_level))
 
-        # --- MODIFIED: +1 channel to accept the reconstructed semantic mask ---
-        in_channels = (9 if stack else 3) + 1
+        # --- MODIFIED: +2 channels to accept BOTH the semantic mask AND the edge map ---
+        in_channels = (9 if stack else 3) + 2
         
         # Layers.
         self.conv = nn.Conv2d(

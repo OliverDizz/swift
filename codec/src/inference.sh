@@ -11,7 +11,7 @@ load_iter=$2
 iterations=${3:-10} # Defaults to 10 (matching your training setup)
 
 # --- MODIFIED: Point to the new semantic model directory ---
-modeldir="model/sem_test_2"
+modeldir="model/sem_test_edge"
 
 train="data/train"  # Dummy path required by parser
 eval="data/eval"

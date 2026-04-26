@@ -126,17 +126,18 @@ def run_eval(model, eval_loader, args, output_suffix=''):
 
   start_time = time.time()
   
-  # --- THE FIX: Add `masks` to the dataloader unpacking ---
-  for i, (batch, ctx_frames, filenames, masks) in enumerate(eval_loader):
+  # --- MODIFIED: Add `edges` to the dataloader unpacking ---
+  for i, (batch, ctx_frames, filenames, masks, edges) in enumerate(eval_loader):
 
       with torch.no_grad():
           # FIX: Replaced .cuda() with .to(primary_device) to avoid DataParallel mismatch crashes
           batch = batch.to(primary_device)
-          masks = masks.to(primary_device) # --- NEW: Move masks to GPU ---
+          masks = masks.to(primary_device) 
+          edges = edges.to(primary_device) # --- NEW: Move edges to GPU ---
 
-          # --- MODIFIED: Pass masks to eval_forward ---
+          # --- MODIFIED: Pass masks and edges to eval_forward ---
           original, out_imgs, out_imgs_ee1, out_imgs_ee2, out_imgs_ee3, out_imgs_ee4, losses, code_batch = eval_forward(
-                  model, (batch, ctx_frames, masks), args)
+                  model, (batch, ctx_frames, masks, edges), args)
 
           losses, msssim, psnr = finish_batch(
                   args, filenames, original, out_imgs,
@@ -147,7 +148,7 @@ def run_eval(model, eval_loader, args, output_suffix=''):
           psnr_ee3 = get_psnr(args, filenames, original, out_imgs_ee3)
           psnr_ee4 = get_psnr(args, filenames, original, out_imgs_ee4)
 
-          # --- NEW: Calculate Semantic PSNR ---
+          # Calculate Semantic PSNR
           psnr_semantic = get_semantic_psnr(args, filenames, original, out_imgs, masks)
 
           all_losses += losses
@@ -158,13 +159,13 @@ def run_eval(model, eval_loader, args, output_suffix=''):
           all_psnr_ee2 += psnr_ee2
           all_psnr_ee3 += psnr_ee3
           all_psnr_ee4 += psnr_ee4
-          all_psnr_semantic += psnr_semantic # --- NEW ---
+          all_psnr_semantic += psnr_semantic 
 
       if i % 10 == 0:
         print('\tevaluating iter %d (%f seconds)...' % (
           i, time.time() - start_time))
 
-  # --- MODIFIED: Return Semantic PSNR metric as the 8th value in the tuple ---
+  # Return Semantic PSNR metric as the 8th value in the tuple
   return (np.array(all_losses).mean(axis=0),
           np.array(all_msssim).mean(axis=0),
           np.array(all_psnr).mean(axis=0),
@@ -172,5 +173,5 @@ def run_eval(model, eval_loader, args, output_suffix=''):
           np.array(all_psnr_ee2).mean(axis=0),
           np.array(all_psnr_ee3).mean(axis=0),
           np.array(all_psnr_ee4).mean(axis=0),
-          np.array(all_psnr_semantic).mean(axis=0) # --- NEW ---
+          np.array(all_psnr_semantic).mean(axis=0) 
           )
