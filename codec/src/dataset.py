@@ -63,7 +63,6 @@ class ResolutionBatchSampler(torch.utils.data.Sampler):
     def __len__(self):
         return sum(len(indices) // self.batch_size for indices in self.resolution_buckets.values())
 
-# --- MODIFIED: Added edge_dir ---
 def get_loader(is_train, root, mv_dir, mask_dir, edge_dir, args):
     print('\nCreating loader for %s...' % root)
 
@@ -72,7 +71,7 @@ def get_loader(is_train, root, mv_dir, mask_dir, edge_dir, args):
         root=root,
         mv_dir=mv_dir,
         mask_dir=mask_dir,
-        edge_dir=edge_dir, # <-- NEW
+        edge_dir=edge_dir, 
         args=args,
     )
 
@@ -86,7 +85,6 @@ def get_loader(is_train, root, mv_dir, mask_dir, edge_dir, args):
             num_workers=12,
             pin_memory=True,
             worker_init_fn=worker_init_fn
-            # Note: shuffle and drop_last are handled inside the batch_sampler now
         )
     else:
         # Evaluation usually runs with batch_size=1, so it doesn't need the sampler
@@ -205,13 +203,12 @@ def get_group_filenames(filename, img_idx, distance1, distance2):
 
 def get_bmv_filenames(mv_dir, root_dir, main_fn):
     # Calculate the relative path to maintain the video folder structure
-    # e.g., 'video_01/00001.png'
     rel_path = os.path.relpath(main_fn, root_dir)
     
-    # Extract the subdirectory name (e.g., 'video_01')
+    # Extract the subdirectory name
     sub_dir = os.path.dirname(rel_path)
     
-    # Extract the base filename without extension (e.g., '00001')
+    # Extract the base filename without extension
     fn = os.path.basename(main_fn)[:-4]
 
     # Combine mv_dir with the specific video's subdirectory
@@ -241,7 +238,6 @@ def np_to_torch(img):
 class ImageFolder(data.Dataset):
     """ ImageFolder can be used to load images where there are no labels."""
 
-    # --- MODIFIED: Added edge_dir ---
     def __init__(self, is_train, root, mv_dir, mask_dir, edge_dir, args):
 
         self.is_train = is_train
@@ -249,7 +245,7 @@ class ImageFolder(data.Dataset):
         self.args = args
         self.mv_dir = mv_dir
         self.mask_dir = mask_dir
-        self.edge_dir = edge_dir # <-- NEW
+        self.edge_dir = edge_dir 
 
         self.patch = args.patch
         self.loader = default_loader
@@ -333,9 +329,7 @@ class ImageFolder(data.Dataset):
             img_idx = int(main_fn[:-4].split('_')[-1])
 
             assert bmv.shape[2] == 4
-            # I 2 3 D 5 6 D 8 9 B 11 12 I
             if img_idx % 12 in [3, 6, 9, 0]:
-                # From (before, after) to (close, far).
                 tmp = bmv[:, :, :2].copy()
                 bmv[:, :, :2] = bmv[:, :, 2:4].copy()
                 bmv[:, :, 2:4] = tmp
@@ -344,7 +338,6 @@ class ImageFolder(data.Dataset):
                     assert img_idx % 12 in [2, 5, 8, 11]
 
             width, height, c = img.shape
-            # For both train and eval. We use full context.
             bmv[:, :, 0] = bmv[:, :, 0] / height
             bmv[:, :, 1] = bmv[:, :, 1] / width
             bmv[:, :, 2] = bmv[:, :, 2] / height
@@ -358,7 +351,7 @@ class ImageFolder(data.Dataset):
         target_h, target_w = img.shape[0], img.shape[1]
         
         # -----------------------------------------------------------------
-        # 1. LOAD SEMANTIC MASK
+        # 1. LOAD SEMANTIC MASK (With rigorous binarization)
         # -----------------------------------------------------------------
         if base_name.startswith('frame_') and base_name.endswith('.png'):
             frame_num = int(base_name[6:-4])
@@ -373,6 +366,7 @@ class ImageFolder(data.Dataset):
             if mask.shape[0] != target_h or mask.shape[1] != target_w:
                 mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
             mask = mask.astype(np.float32) / 255.0
+            mask = (mask > 0.5).astype(np.float32) # GUARANTEE strict binary for Dice/BCE loss
         else:
             print(f"WARNING: Mask not found at {mask_fn}. Using empty mask.")
             mask = np.zeros((target_h, target_w), dtype=np.float32)
@@ -380,9 +374,8 @@ class ImageFolder(data.Dataset):
         mask = mask[:, :, np.newaxis]
         
         # -----------------------------------------------------------------
-        # 2. LOAD STRUCTURAL EDGE MAP
+        # 2. LOAD STRUCTURAL EDGE MAP (With rigorous binarization)
         # -----------------------------------------------------------------
-        # We named the edge maps identically to the standard images (4-digits)
         edge_fn = os.path.join(self.edge_dir, rel_path)
         edge = cv2.imread(edge_fn, cv2.IMREAD_GRAYSCALE)
         
@@ -390,17 +383,17 @@ class ImageFolder(data.Dataset):
             if edge.shape[0] != target_h or edge.shape[1] != target_w:
                 edge = cv2.resize(edge, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
             edge = edge.astype(np.float32) / 255.0
+            edge = (edge > 0.5).astype(np.float32) # GUARANTEE strict binary for Focal loss
         else:
             print(f"WARNING: Edge map not found at {edge_fn}. Using empty edge map.")
             edge = np.zeros((target_h, target_w), dtype=np.float32)
             
         edge = edge[:, :, np.newaxis]
 
-        # --- MODIFIED: Append both mask and edge to the very end ---
+        # Append both mask and edge to the very end
         img = np.concatenate([img, mask, edge], axis=2)
 
         if self.is_train:
-            # flip_cv2 dynamically flips all appended channels automatically
             img = flip_cv2(img, self.patch)
 
         if self.identity_grid is None or self.identity_grid.shape[:2] != img.shape[:2]:
@@ -415,11 +408,11 @@ class ImageFolder(data.Dataset):
         if self.is_train:
             crops = []
             masks = []
-            edges = [] # <-- NEW
+            edges = []
             for i in range(self._num_crops):
                 crop = crop_cv2(img, self.patch)
                 
-                # --- MODIFIED: Separate the edge and mask channels ---
+                # Separate the edge and mask channels
                 edge_crop = crop[..., -1:]   # Last channel is the edge
                 mask_crop = crop[..., -2:-1] # Second to last channel is the mask
                 img_crop = crop[..., :-2]    # Everything else is image + bmv
@@ -427,10 +420,10 @@ class ImageFolder(data.Dataset):
                 img_crop[..., :9] /= 255.0
                 crops.append(np_to_torch(img_crop))
                 masks.append(np_to_torch(mask_crop))
-                edges.append(np_to_torch(edge_crop)) # <-- NEW
+                edges.append(np_to_torch(edge_crop)) 
             data = crops
             mask_data = masks
-            edge_data = edges # <-- NEW
+            edge_data = edges
         else:
             # Separate them during evaluation as well
             edge_data = np_to_torch(img[..., -1:])
@@ -443,7 +436,6 @@ class ImageFolder(data.Dataset):
         ctx_frames /= 255.0
         ctx_frames = np_to_torch(ctx_frames)
 
-        # --- MODIFIED: Return the isolated edge data for train.py ---
         return data, ctx_frames, main_fn, mask_data, edge_data
 
     def __len__(self):

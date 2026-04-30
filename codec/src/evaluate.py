@@ -6,6 +6,7 @@ import numpy as np
 
 import torch
 import torch.utils.data as data
+import torch.nn.functional as F
 
 from util import eval_forward, evaluate, evaluate_psnr, get_models, set_eval, save_numpy_array_as_image
 from torchvision import transforms
@@ -107,6 +108,20 @@ def get_semantic_psnr(args, filenames, original, out_imgs, masks):
 
     return all_psnr
 
+# --- NEW: Independent Base Layer Evaluation Metrics (SVC Requirement) ---
+def calculate_iou_dice(pred, target, threshold=0.5):
+    """Calculates Intersection over Union (IoU) and Dice Score for binary masks."""
+    pred_bin = (pred > threshold).float()
+    target_bin = (target > threshold).float()
+    
+    intersection = (pred_bin * target_bin).sum(dim=[1, 2, 3])
+    union = pred_bin.sum(dim=[1, 2, 3]) + target_bin.sum(dim=[1, 2, 3]) - intersection
+    
+    iou = (intersection + 1e-6) / (union + 1e-6)
+    dice = (2. * intersection + 1e-6) / (pred_bin.sum(dim=[1, 2, 3]) + target_bin.sum(dim=[1, 2, 3]) + 1e-6)
+    
+    return iou.mean().item(), dice.mean().item()
+
 
 def run_eval(model, eval_loader, args, output_suffix=''):
 
@@ -118,24 +133,48 @@ def run_eval(model, eval_loader, args, output_suffix=''):
 
   all_losses, all_msssim, all_psnr = [], [], []
   all_psnr_ee1, all_psnr_ee2, all_psnr_ee3, all_psnr_ee4 = [], [], [], []
-  all_psnr_semantic = [] # --- NEW Tracker ---
+  all_psnr_semantic = [] 
+  
+  # --- NEW Trackers for Base Layer Fidelity ---
+  all_mask_iou, all_mask_dice = [], []
+  all_edge_iou, all_edge_dice = [], []
 
   # FIX: Determine the primary device dynamically using args.gpus
   gpus = [int(gpu) for gpu in args.gpus.split(',')] if hasattr(args, 'gpus') and args.gpus else []
   primary_device = torch.device(f"cuda:{gpus[0]}" if len(gpus) > 0 and torch.cuda.is_available() else "cpu")
 
+  # Extract base layer models from the `nets` list passed from train.py
+  # nets = [encoder, binarizer, decoder, d2, sem_enc, sem_bin, sem_dec, edge_enc, edge_bin, edge_dec, unet]
+  sem_enc, sem_bin, sem_dec = model[4], model[5], model[6]
+  edge_enc, edge_bin, edge_dec = model[7], model[8], model[9]
+
   start_time = time.time()
   
-  # --- MODIFIED: Add `edges` to the dataloader unpacking ---
   for i, (batch, ctx_frames, filenames, masks, edges) in enumerate(eval_loader):
 
       with torch.no_grad():
-          # FIX: Replaced .cuda() with .to(primary_device) to avoid DataParallel mismatch crashes
           batch = batch.to(primary_device)
           masks = masks.to(primary_device) 
-          edges = edges.to(primary_device) # --- NEW: Move edges to GPU ---
+          edges = edges.to(primary_device) 
 
-          # --- MODIFIED: Pass masks and edges to eval_forward ---
+          # ---------------------------------------------------------
+          # NEW: INDEPENDENT BASE LAYER EVALUATION
+          # Simulate the LEO receiver decoding ONLY the semantic/edge stream
+          # ---------------------------------------------------------
+          rec_masks = sem_dec(sem_bin(sem_enc(masks)))
+          rec_edges = edge_dec(edge_bin(edge_enc(edges)))
+
+          m_iou, m_dice = calculate_iou_dice(rec_masks, masks)
+          e_iou, e_dice = calculate_iou_dice(rec_edges, edges)
+
+          all_mask_iou.append(m_iou)
+          all_mask_dice.append(m_dice)
+          all_edge_iou.append(e_iou)
+          all_edge_dice.append(e_dice)
+
+          # ---------------------------------------------------------
+          # VISUAL ENHANCEMENT EVALUATION
+          # ---------------------------------------------------------
           original, out_imgs, out_imgs_ee1, out_imgs_ee2, out_imgs_ee3, out_imgs_ee4, losses, code_batch = eval_forward(
                   model, (batch, ctx_frames, masks, edges), args)
 
@@ -162,10 +201,10 @@ def run_eval(model, eval_loader, args, output_suffix=''):
           all_psnr_semantic += psnr_semantic 
 
       if i % 10 == 0:
-        print('\tevaluating iter %d (%f seconds)...' % (
-          i, time.time() - start_time))
+        print('\tevaluating iter %d (%f seconds)... | Mask IoU: %.4f | Edge IoU: %.4f | Sem PSNR: %.2f' % (
+          i, time.time() - start_time, np.mean(all_mask_iou), np.mean(all_edge_iou), np.mean(all_psnr_semantic)))
 
-  # Return Semantic PSNR metric as the 8th value in the tuple
+  # Return all metrics, appending the new Base Layer structural metrics at the end
   return (np.array(all_losses).mean(axis=0),
           np.array(all_msssim).mean(axis=0),
           np.array(all_psnr).mean(axis=0),
@@ -173,5 +212,10 @@ def run_eval(model, eval_loader, args, output_suffix=''):
           np.array(all_psnr_ee2).mean(axis=0),
           np.array(all_psnr_ee3).mean(axis=0),
           np.array(all_psnr_ee4).mean(axis=0),
-          np.array(all_psnr_semantic).mean(axis=0) 
+          np.array(all_psnr_semantic).mean(axis=0),
+          # --- NEW: Base layer specific metrics ---
+          np.mean(all_mask_iou),
+          np.mean(all_mask_dice),
+          np.mean(all_edge_iou),
+          np.mean(all_edge_dice)
           )

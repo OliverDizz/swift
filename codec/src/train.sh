@@ -6,7 +6,8 @@ if (( $# != 1 )); then
 fi
 hier=$1
 
-modeldir=model/sem_test_edge
+# This is the directory where your checkpoints AND tensorboard logs will go
+modeldir=model/full_sem_test
 
 train="data/train"
 eval="data/eval"
@@ -16,8 +17,14 @@ eval_mv="data/eval_mv"
 train_masks="data/train_masks"
 eval_masks="data/eval_masks"
 
-train_edge="data/train_edge"
-eval_edge="data/eval_edge"
+train_edges="data/train_edges"
+eval_edges="data/eval_edges"
+
+# --- Curriculum Learning Threshold ---
+# Iterations 0 to 30k: Semantic & Edge base layers only.
+# Iterations 30k to 50k: Visual enhancement layers.
+phase1_iters=30000 
+max_iters=50000
 
 if [[ ${hier} == "0" ]]; then
   distance1=6
@@ -42,6 +49,16 @@ else
   exit
 fi
 
+echo "================================================="
+echo "Starting SVC Training (Semantic + Visual Layers)"
+echo "Hierarchy Level: ${hier}"
+echo "Model Directory: ${modeldir}"
+echo "-------------------------------------------------"
+echo "Execution Plan:"
+echo "  -> Phase 1 (Base): 0 - ${phase1_iters} iters"
+echo "  -> Phase 2 (Visual): ${phase1_iters} - ${max_iters} iters"
+echo "================================================="
+
 # Execute Python Training
 python -u train.py \
   --train ${train} \
@@ -50,23 +67,18 @@ python -u train.py \
   --eval-mv ${eval_mv} \
   --train-masks ${train_masks} \
   --eval-masks ${eval_masks} \
-  --train-edges ${train_edge} \
-  --eval-edges ${eval_edge} \
+  --train-edges ${train_edges} \
+  --eval-edges ${eval_edges} \
   --encoder-fuse-level ${encoder_fuse_level} \
   --decoder-fuse-level ${decoder_fuse_level} \
+  --phase1-iters ${phase1_iters} \
+  --max-train-iters ${max_iters} \
   --v-compress --warp --stack --fuse-encoder \
   --bits ${bits} \
   --distance1 ${distance1} \
   --distance2 ${distance2} \
-  --max-train-iters 10000 \
-  --checkpoint-iters 10000 \
-  --eval-iters 5000 \
   --model-dir ${modeldir} \
   --batch-size 2 \
   --gpus 0,1 \
-  --schedule "5000,10000,20000,30000,40000"
-
-  # Full training iters
-  #--max-train-iters 50000 \
-  #--checkpoint-iters 5000 \
-  #--eval-iters 1000 \
+  --checkpoint-iters 25000 \
+  --eval-iters 50000

@@ -80,55 +80,70 @@ class EncoderCell(nn.Module):
         return x, hidden1, hidden2, hidden3
 
 
-# --- NEW: Semantic Encoder ---
+# --- PRUNED: Ultra-Lightweight Base Layer Encoder ---
 class SemanticEncoder(nn.Module):
     """
-    Encodes a 1-channel semantic mask down by a factor of 16 to match the video bottleneck.
+    Encodes a 1-channel semantic/edge mask down by a factor of 16.
+    Drastically reduced channel depth [8, 16, 32, 64] for LEO ultra-low bitrate.
     """
     def __init__(self, in_channels=1):
         super(SemanticEncoder, self).__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(in_channels, 8, kernel_size=3, stride=2, padding=1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
         return self.net(x)
 
-# --- NEW: Semantic Decoder ---
+
+# --- NEW: Lightweight Semantic Binarizer ---
+class SemanticBinarizer(nn.Module):
+    def __init__(self, bits):
+        super(SemanticBinarizer, self).__init__()
+        # Takes the 64-channel output of the pruned encoder
+        self.conv = nn.Conv2d(64, bits, kernel_size=1, bias=False)
+        self.sign = Sign()
+
+    def forward(self, input):
+        feat = self.conv(input)
+        x = torch.tanh(feat)
+        return self.sign(x)
+
+
+# --- PRUNED: Base Layer Decoder ---
 class SemanticDecoder(nn.Module):
     """
-    Decodes the binarized bottleneck back to full resolution (16x upsample).
+    Decodes the lightweight binarized bottleneck back to full resolution.
     """
-    def __init__(self, out_channels=1, bits=32):
+    def __init__(self, out_channels=1, bits=8): # Note: Default bits for semantic should be small
         super(SemanticDecoder, self).__init__()
-        
-        self.conv_in = nn.Conv2d(bits, 512, kernel_size=1, bias=False)
+        self.conv_in = nn.Conv2d(bits, 64, kernel_size=1, bias=False)
         
         self.up1 = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.PixelShuffle(2), # 512 -> 128
-            nn.ReLU(inplace=True)
-        )
-        self.up2 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.PixelShuffle(2), # 256 -> 64
-            nn.ReLU(inplace=True)
-        )
-        self.up3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
             nn.PixelShuffle(2), # 128 -> 32
             nn.ReLU(inplace=True)
         )
+        self.up2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 64 -> 16
+            nn.ReLU(inplace=True)
+        )
+        self.up3 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 32 -> 8
+            nn.ReLU(inplace=True)
+        )
         self.up4 = nn.Sequential(
-            nn.Conv2d(32, out_channels * 4, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.PixelShuffle(2)  # out_channels*4 -> out_channels
+            nn.Conv2d(8, out_channels * 4, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2)  # 4 -> 1
         )
 
     def forward(self, x):
@@ -137,7 +152,7 @@ class SemanticDecoder(nn.Module):
         x = self.up2(x)
         x = self.up3(x)
         x = self.up4(x)
-        return torch.sigmoid(x) # Constrain output mask between 0 and 1
+        return torch.sigmoid(x) # Constrain to [0, 1] probability
 
 
 class Binarizer(nn.Module):
@@ -248,8 +263,6 @@ class DecoderCell(nn.Module):
 
         x = torch.tanh(self.conv2(x)) / 2
         return x, hidden1, hidden2, hidden3, hidden4
-
-
 
 
 #variable group ---- use this one for now --- best performing
