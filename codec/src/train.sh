@@ -7,7 +7,7 @@ fi
 hier=$1
 
 # This is the directory where your checkpoints AND tensorboard logs will go
-modeldir=model/full_sem_test
+modeldir=model/full_sem_test_2
 
 train="data/train"
 eval="data/eval"
@@ -23,7 +23,7 @@ eval_edges="data/eval_edges"
 # --- Curriculum Learning Threshold ---
 # Iterations 0 to 30k: Semantic & Edge base layers only.
 # Iterations 30k to 50k: Visual enhancement layers.
-phase1_iters=30000 
+phase1_iters=15000 
 max_iters=50000
 
 if [[ ${hier} == "0" ]]; then
@@ -77,6 +77,7 @@ python -u train.py \
   --bits ${bits} \
   --distance1 ${distance1} \
   --distance2 ${distance2} \
+  --lr 0.0004 \
   --model-dir ${modeldir} \
   --batch-size 2 \
   --gpus 0,1 \

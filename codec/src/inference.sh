@@ -1,9 +1,9 @@
 #!/bin/bash
 
 if (( $# < 2 )); then
-    echo "Usage: ./inference.sh [hier: 0-2] [load-iter] [iterations (optional, default: 10)] [full_video (optional, 0 or 1, default: 0)]"
+    echo "Usage: ./inference.sh [hier: 0-2] [load-iter] [iterations (optional, default: 10)] [full_video (optional, 0 or 1, default: 0)] [out_dir (optional)]"
     echo "Example (Single Batch): ./inference.sh 0 2200 10 0"
-    echo "Example (Full Video):   ./inference.sh 0 2200 10 1"
+    echo "Example (Full Video):   ./inference.sh 0 2200 10 1 inference_results/sem_improved_model"
     exit 1
 fi
 
@@ -11,6 +11,9 @@ hier=$1
 load_iter=$2
 iterations=${3:-10} # Defaults to 10 (matching your training setup)
 full_video_param=${4:-0} # Defaults to 0 (Single Batch)
+
+# --- NEW: Output Directory Parameter ---
+out_dir=${5:-"inference_results/sem_improved_model_2"} # Defaults to sem_improved_model if not specified
 
 # Process the full video flag
 full_video_flag=""
@@ -22,7 +25,7 @@ else
 fi
 
 # --- MODIFIED: Point to the new semantic model directory ---
-modeldir="model/full_sem_test"
+modeldir="model/full_sem_test_2"
 #modeldir="baseline_model/baseline"
 
 train="data/train"  # Dummy path required by parser
@@ -66,6 +69,7 @@ echo "Hierarchy Level: ${hier} (Distances: ${distance1}/${distance2})"
 echo "Loading Checkpoint: Iteration ${load_iter}"
 echo "Decoding Layers (Iterations): ${iterations}"
 echo "Execution Mode: ${mode_string}"
+echo "Output Directory: ${out_dir}"
 echo "================================================="
 
 python -u inference.py \
@@ -87,4 +91,5 @@ python -u inference.py \
   --load-model-name "demo" \
   --load-iter ${load_iter} \
   --iterations ${iterations} \
+  --out_dir ${out_dir} \
   ${full_video_flag}

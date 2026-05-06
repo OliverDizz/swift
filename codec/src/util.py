@@ -327,8 +327,8 @@ def forward_model(model, cooked_batch, ctx_frames, masks, edges, args, v_compres
                 code_d2, d2_h_1, d2_h_2, d2_h_3, d2_h_4,
                 tuple(dec_unet_output1), tuple(dec_unet_output2))
         
-        if args.save_codes:
-            codes.append(code_d2.data.cpu().numpy())
+        
+        codes.append(code.data.cpu().numpy())
 
         out_img_new = out_img + output_d2.data.cpu()
         out_img_np = out_img_new.numpy().clip(0, 1)

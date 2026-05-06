@@ -14,13 +14,11 @@ from train_options import parser
 from util import get_models, init_lstm, set_train, set_eval, init_d2
 from util import prepare_inputs, forward_ctx
 
-# --- FIXED: Import for Python 3.6 / Older PyTorch compatibility ---
 from torch.utils.tensorboard.writer import SummaryWriter
 
 import network
 import code
 
-# --- NEW: Add Curriculum Learning Argument ---
 parser.add_argument('--phase1-iters', type=int, default=30000, 
                     help='Number of iterations to train ONLY the base layers before unfreezing visual layers.')
 
@@ -35,6 +33,15 @@ def dice_loss(pred, target, smooth=1e-5):
     intersection = (pred * target).sum(dim=[1, 2, 3])
     union = pred.sum(dim=[1, 2, 3]) + target.sum(dim=[1, 2, 3])
     return (1 - (2. * intersection + smooth) / (union + smooth)).mean()
+
+def tversky_loss(pred, target, alpha=0.3, beta=0.7, smooth=1e-5):
+    """Tversky loss: a generalization of Dice. alpha=beta=0.5 is Dice."""
+    ones = torch.ones_like(target)
+    p0, p1 = pred, ones - pred
+    g0, g1 = target, ones - target
+    num = (p0 * g0).sum(dim=[1, 2, 3])
+    den = num + alpha * (p0 * g1).sum(dim=[1, 2, 3]) + beta * (p1 * g0).sum(dim=[1, 2, 3])
+    return (1 - (num + smooth) / (den + smooth)).mean()
 
 def focal_loss(pred, target, alpha=0.75, gamma=2.0):
     """Focal loss for highly imbalanced Canny edge maps."""
@@ -85,19 +92,23 @@ class CodecLoop(nn.Module):
         semantic_codes = self.semantic_binarizer(sem_encoded)
         reconstructed_semantics = self.semantic_decoder(semantic_codes)
         
-        sem_bce = F.binary_cross_entropy(reconstructed_semantics, semantic_gt)
-        semantic_loss = sem_bce + dice_loss(reconstructed_semantics, semantic_gt)
+        sem_focal = focal_loss(reconstructed_semantics, semantic_gt, alpha=0.5) 
+        semantic_loss = sem_focal + tversky_loss(reconstructed_semantics, semantic_gt)
 
         # PASS 1: STRUCTURAL ENHANCEMENT LAYER
         edge_encoded = self.edge_encoder(edge_gt)
         edge_codes = self.edge_binarizer(edge_encoded)
         reconstructed_edges = self.edge_decoder(edge_codes)
         
-        edge_loss = focal_loss(reconstructed_edges, edge_gt) + dice_loss(reconstructed_edges, edge_gt)
+        # --- IMPROVED: Soft Edge Targets ---
+        # Dilate the target slightly so the loss doesn't explode if the network misses a line by 1 pixel
+        edge_gt_soft = F.max_pool2d(edge_gt, kernel_size=3, stride=1, padding=1)
+        edge_loss = focal_loss(reconstructed_edges, edge_gt_soft) + dice_loss(reconstructed_edges, edge_gt_soft)
 
         # LAYER DROPOUT
         if self.training:
-            drop_mask = (torch.rand(1) > 0.15).float().to(device)
+            # --- FIXED: Per-sample dropout mask instead of whole-batch to stabilize gradients ---
+            drop_mask = (torch.rand(batch_size, 1, 1, 1, device=device) > 0.15).float()
             sem_input = reconstructed_semantics.detach() * drop_mask
             edge_input = reconstructed_edges.detach() * drop_mask
         else:
@@ -117,10 +128,14 @@ class CodecLoop(nn.Module):
         ee1_losses, ee2_losses, ee3_losses, ee4_losses = [], [], [], []
 
         for i in range(self.args.iterations):
+            # --- IMPROVED: Semantic Target Weighting ---
+            # Boost the residual values where the semantic mask is active to guide the visual bits
+            roi_res = res * (1.0 + sem_input)
+
             if self.args.v_compress and self.args.stack:
-                encoder_input = torch.cat([frame1, res, frame2, sem_input, edge_input], dim=1)
+                encoder_input = torch.cat([frame1, roi_res, frame2, sem_input, edge_input], dim=1)
             else:
-                encoder_input = torch.cat([res, sem_input, edge_input], dim=1)
+                encoder_input = torch.cat([roi_res, sem_input, edge_input], dim=1)
 
             encoded, encoder_h_1, encoder_h_2, encoder_h_3 = self.encoder(
                 encoder_input, encoder_h_1, encoder_h_2, encoder_h_3,
@@ -203,9 +218,10 @@ semantic_encoder = network.SemanticEncoder(in_channels=1).to(primary_device)
 semantic_binarizer = network.SemanticBinarizer(bits=SEMANTIC_BITS).to(primary_device) 
 semantic_decoder = network.SemanticDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
 
-edge_encoder = network.SemanticEncoder(in_channels=1).to(primary_device)
-edge_binarizer = network.SemanticBinarizer(bits=SEMANTIC_BITS).to(primary_device) 
-edge_decoder = network.SemanticDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
+# --- FIXED: Init Edge-Specific Layers Instead of Semantic Re-use ---
+edge_encoder = network.EdgeEncoder(in_channels=1).to(primary_device)
+edge_binarizer = network.EdgeBinarizer(bits=SEMANTIC_BITS).to(primary_device) 
+edge_decoder = network.EdgeDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
 
 if len(gpus) > 1:
     print("Using GPUs {}.".format(gpus))
@@ -229,18 +245,19 @@ if unet is not None:
 params = [{'params': net.parameters()} for net in nets]
 solver = optim.Adam(params, lr=args.lr)
 
-# --- NEW: Automatic Curriculum-Aware Learning Schedule ---
-phase2_duration = args.max_train_iters - args.phase1_iters
-auto_milestones = [
-    args.phase1_iters,                                # Drop 1: Start of Phase 2
-    args.phase1_iters + (phase2_duration // 2)        # Drop 2: Midpoint of Phase 2
-]
-scheduler = LS.MultiStepLR(solver, milestones=auto_milestones, gamma=0.5)
+# --- IMPROVED: Extended learning schedule to prevent LR starvation ---
+# total_steps is extended by 1.5x so the visual phase has plenty of LR headroom.
+scheduler = LS.OneCycleLR(
+    solver, 
+    max_lr=args.lr * 2, 
+    total_steps=int(args.max_train_iters * 1.5), 
+    pct_start=0.2, 
+    anneal_strategy='cos'
+)
 
 if not os.path.exists(args.model_dir):
   os.makedirs(args.model_dir)
 
-# --- NEW: Initialize TensorBoard Writer ---
 tensorboard_dir = os.path.join(args.model_dir, 'tensorboard_logs')
 writer = SummaryWriter(log_dir=tensorboard_dir)
 print(f"TensorBoard initialized! Run 'tensorboard --logdir={tensorboard_dir}' to view.")
@@ -311,13 +328,11 @@ while True:
         semantic_loss = semantic_batch.mean()
         edge_loss = edge_batch.mean() 
 
-        # STAGED CURRICULUM LEARNING
-        if train_iter <= args.phase1_iters:
-            loss = semantic_loss + edge_loss
-        else:
-            visual_loss = (rec1_loss+rec2_loss)*0.5 + (ee1_loss+ee2_loss+ee3_loss+ee4_loss)*0.25
-            loss = visual_loss + (semantic_loss * 0.05) + (edge_loss * 0.05)
-
+        ramp_start = 5000
+        visual_weight = min(1.0, max(0.0, (train_iter - ramp_start) / (args.phase1_iters - ramp_start)))
+        visual_loss = (rec1_loss + rec2_loss) * 0.5 + (ee1_loss + ee2_loss + ee3_loss + ee4_loss) * 0.25
+        loss = (visual_loss * visual_weight) + semantic_loss + edge_loss
+        
         loss.backward()
 
         for net in nets:
@@ -335,7 +350,6 @@ while True:
                 '[TRAIN] Iter[{}]; LR: {:.2e}; Losses [Sem: {:.4f}; Edge: {:.4f}; Rec1: {:.4f}; Rec2: {:.4f}; EE1: {:.4f}]; Batch: {:.4f} s'.
                 format(train_iter, current_lr, semantic_loss.item(), edge_loss.item(), rec1_loss.item(), rec2_loss.item(), ee1_loss.item(), batch_t1 - batch_t0))
 
-            # --- NEW: Log to TensorBoard ---
             writer.add_scalar('Loss/Total', loss.item(), train_iter)
             writer.add_scalar('Loss_BaseLayers/Semantic', semantic_loss.item(), train_iter)
             writer.add_scalar('Loss_BaseLayers/Edge', edge_loss.item(), train_iter)

@@ -2,6 +2,7 @@ import os
 import torch
 import numpy as np
 import argparse
+import csv
 
 # Import specific components from your codebase
 from train_options import parser
@@ -9,10 +10,39 @@ from util import get_models, eval_forward, save_numpy_array_as_image
 import network
 from dataset import get_loader
 
+# --- ADDED: Entropy Calculation Function (Type-Safe) ---
+def calculate_entropy_bits(data_input):
+    """
+    Calculates the theoretical minimum bits required to transmit this tensor/array
+    using Shannon Entropy, simulating a perfect entropy encoder.
+    """
+    # --- FIXED: Handle both PyTorch tensors and NumPy arrays safely ---
+    if hasattr(data_input, 'detach'):
+        # It's a PyTorch tensor, move to CPU and convert to numpy
+        data = data_input.detach().cpu().numpy().flatten()
+    else:
+        # It's already a NumPy array or list, just flatten it
+        data = np.array(data_input).flatten()
+    
+    # Count occurrences of each unique value
+    _, counts = np.unique(data, return_counts=True)
+    
+    # Calculate probabilities
+    probabilities = counts / len(data)
+    
+    # Shannon Entropy formula: H = -sum(p * log2(p))
+    entropy = -np.sum(probabilities * np.log2(probabilities))
+    
+    # Total bits is the entropy per symbol times the number of symbols
+    return entropy * len(data)
+
 def main():
-    # --- NEW: Add custom argument for full video processing ---
     parser.add_argument('--full_video', action='store_true', 
                         help='Process all frames in the eval dataset to compile into a video.')
+    
+    parser.add_argument('--out_dir', type=str, default='inference_results/default_run',
+                        help='Directory to save the exported frames.')
+    
     args = parser.parse_args()
     
     gpus = [int(gpu) for gpu in args.gpus.split(',')] if hasattr(args, 'gpus') and args.gpus else []
@@ -34,7 +64,6 @@ def main():
         fuse_level=args.decoder_fuse_level
     ).to(primary_device)
 
-    # --- MODIFIED: Ultra-low bitrate setup for base layers (must match train.py) ---
     SEMANTIC_BITS = 4
 
     # PASS 0: Initialize Semantic Base Layer Models
@@ -43,9 +72,9 @@ def main():
     semantic_decoder = network.SemanticDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
 
     # PASS 1: Initialize Structural Edge Layer Models
-    edge_encoder = network.SemanticEncoder(in_channels=1).to(primary_device)
-    edge_binarizer = network.SemanticBinarizer(bits=SEMANTIC_BITS).to(primary_device)
-    edge_decoder = network.SemanticDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
+    edge_encoder = network.EdgeEncoder(in_channels=1).to(primary_device)
+    edge_binarizer = network.EdgeBinarizer(bits=SEMANTIC_BITS).to(primary_device)
+    edge_decoder = network.EdgeDecoder(out_channels=1, bits=SEMANTIC_BITS).to(primary_device)
 
     nets = [encoder, binarizer, decoder, d2, 
             semantic_encoder, semantic_binarizer, semantic_decoder,
@@ -89,7 +118,12 @@ def main():
         args=args
     )
     
-    out_dir = "inference_results/test_old_sem"
+    out_dir = args.out_dir
+    
+    # --- MODIFIED: Latent size counters (now tracking true entropy bits) ---
+    total_bits_semantic = 0.0
+    total_bits_edge = 0.0
+    total_bits_visual = [] # Will hold a list of bit counts for each visual layer
     
     # 4. Run Inference Loop
     print(f"Running inference... (Full Video Mode: {args.full_video})")
@@ -115,16 +149,28 @@ def main():
             edge_codes = edge_binarizer(edge_encoded)
             reconstructed_edges = edge_decoder(edge_codes)
 
-            # 5. Extract and Save Results for each item in the batch
+            # --- MODIFIED: Calculate actual transmitted size using Shannon Entropy ---
+            # Instead of .numel(), we evaluate how well the data compresses.
+            total_bits_semantic += calculate_entropy_bits(sem_codes)
+            total_bits_edge += calculate_entropy_bits(edge_codes)
+            
             num_layers = out_imgs.shape[0]
+            if not total_bits_visual:
+                total_bits_visual = [0.0] * num_layers
+            
+            # Extract the actual binarized codes for the visual passes and calculate their entropy
+            for i in range(num_layers):
+                # --- FIXED: Layers are the first dimension, so we just use codes[i] ---
+                layer_codes = codes[i]
+                total_bits_visual[i] += calculate_entropy_bits(layer_codes)
+
+            # 5. Extract and Save Results for each item in the batch
             batch_size = batch.shape[0]
             
             for b_idx in range(batch_size):
                 original_frame = original[b_idx]           
-                # Use the original filename or fallback to sequence count
                 base_name = os.path.basename(filenames[b_idx]).split('.')[0] if len(filenames) > b_idx else f"frame_{frame_counter:04d}"
                 
-                # --- Organize folders for easy video generation ---
                 folders = [
                     f"{out_dir}/original",
                     f"{out_dir}/layer_00_semantic_mask",
@@ -165,7 +211,6 @@ def main():
                 
                 frame_counter += 1
 
-            # If not generating a full video, break after the first batch
             if not args.full_video:
                 print("Single batch processed. Run with --full_video to process the entire sequence.")
                 break
@@ -174,9 +219,36 @@ def main():
                 print(f"Processed {frame_counter} frames...")
 
     print(f"\nSuccess! Frames saved to ./{out_dir}/")
+    
     if args.full_video:
-        print("\nTo combine these into a video, you can use ffmpeg in the terminal:")
-        print(f"ffmpeg -framerate 30 -pattern_type glob -i '{out_dir}/layer_02_reconstructed/*.png' -c:v libx264 -pix_fmt yuv420p output_layer_02.mp4")
+        csv_path = os.path.join(out_dir, "latent_code_sizes.csv")
+        print(f"\nExporting true latent code bitrates to {csv_path}...")
+        
+        with open(csv_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Layer', 'Layer_Type', 'Total_Entropy_Bits', 'Total_Kilobytes', 'Cumulative_Kilobytes'])
+            
+            cumulative_kb = 0.0
+            
+            # Write Semantic Layer
+            kb = total_bits_semantic / 8192.0 # (bits / 8) / 1024
+            cumulative_kb += kb
+            writer.writerow(['00', 'Semantic_Mask', f"{total_bits_semantic:.2f}", f"{kb:.2f}", f"{cumulative_kb:.2f}"])
+            
+            # Write Edge Layer
+            kb = total_bits_edge / 8192.0
+            cumulative_kb += kb
+            writer.writerow(['01', 'Structural_Edge', f"{total_bits_edge:.2f}", f"{kb:.2f}", f"{cumulative_kb:.2f}"])
+            
+            # Write Visual Layers
+            for i in range(num_layers):
+                kb = total_bits_visual[i] / 8192.0
+                cumulative_kb += kb
+                layer_num = str(i + 2).zfill(2)
+                writer.writerow([layer_num, f'Visual_Enhancement_{i}', f"{total_bits_visual[i]:.2f}", f"{kb:.2f}", f"{cumulative_kb:.2f}"])
+
+        print("\nTo combine these into a video, you can use the generate_videos.sh script:")
+        print(f"./generate_videos.sh {out_dir}")
 
 if __name__ == '__main__':
     main()

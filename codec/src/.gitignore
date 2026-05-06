@@ -1,2 +1,4 @@
 model/*
 data/*
+inference_results/*
+video_results/*

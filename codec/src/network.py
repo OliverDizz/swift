@@ -167,6 +167,74 @@ class Binarizer(nn.Module):
         return self.sign(x)
 
 
+# --- NEW: Edge-Specific Base Layer Components ---
+class EdgeEncoder(nn.Module):
+    """
+    Encodes the 1-channel high-frequency edge map.
+    Only downsamples by a factor of 4 (instead of 16) to preserve spatial geometry.
+    """
+    def __init__(self, in_channels=1):
+        super(EdgeEncoder, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 8, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            # Notice stride=1 here. We stop spatial downsampling to preserve thin lines.
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class EdgeBinarizer(nn.Module):
+    """
+    Matches the SemanticBinarizer but separated for clarity in your training loop.
+    """
+    def __init__(self, bits):
+        super(EdgeBinarizer, self).__init__()
+        self.conv = nn.Conv2d(64, bits, kernel_size=1, bias=False)
+        self.sign = Sign()
+
+    def forward(self, input):
+        feat = self.conv(input)
+        x = torch.tanh(feat)
+        return self.sign(x)
+
+class EdgeDecoder(nn.Module):
+    """
+    Decodes the 4x downsampled edge bottleneck.
+    Includes an anti-aliasing filter to smooth PixelShuffle checkerboard artifacts.
+    """
+    def __init__(self, out_channels=1, bits=8): 
+        super(EdgeDecoder, self).__init__()
+        self.conv_in = nn.Conv2d(bits, 64, kernel_size=1, bias=False)
+        
+        # Only two upsampling blocks needed to reverse the 4x compression
+        self.up1 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 128 -> 32 channels
+            nn.ReLU(inplace=True)
+        )
+        self.up2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.PixelShuffle(2), # 64 -> 16 channels
+            nn.ReLU(inplace=True)
+        )
+        
+        # Anti-aliasing Smoothing Convolution (Fixes the blocky grid artifacts)
+        self.smooth = nn.Conv2d(16, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+
+    def forward(self, x):
+        x = self.conv_in(x)
+        x = self.up1(x)
+        x = self.up2(x)
+        x = self.smooth(x)
+        return torch.sigmoid(x)
+
 class DecoderCell(nn.Module):
     def __init__(self, v_compress, shrink, bits, fuse_level):
 
